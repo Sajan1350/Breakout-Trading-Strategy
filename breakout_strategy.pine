@@ -59,19 +59,20 @@ adxPeriod       = input.int(14, "ADX Period (Daily)", minval=1, group=grp1)
 // FIXED PARAMETERS
 // ─────────────────────────────────────────────────────────────
 string grp2 = "═══ FIXED SETTINGS ═══"
-poiType         = input.string("Previous Close", "Point of Initiation",
-                   options=["Previous Close", "Today Open", "Max(Open, PrevClose)", "Min(Open, PrevClose)"],
+poiType         = input.string("Today Open", "Point of Initiation",
+                   options=["Today Open", "Previous Close", "Max(Open, PrevClose)", "Min(Open, PrevClose)"],
                    group=grp2)
 
 // ─────────────────────────────────────────────────────────────
 // TIME FILTER — Most profits come from specific time windows
 // ─────────────────────────────────────────────────────────────
 string grp3 = "═══ TIME FILTER ═══"
-useTimeFilter   = input.bool(true, "Enable Time Filter", group=grp3)
+useTimeFilter   = input.bool(false, "Enable Time Filter", group=grp3,
+                   tooltip="Disable for Gold/Energies. Enable and set hours for equity index futures (ES/NQ/YM).")
 entryStartHour  = input.int(9, "Entry Start Hour", minval=0, maxval=23, group=grp3)
 entryStartMin   = input.int(30, "Entry Start Minute", minval=0, maxval=59, group=grp3)
-entryEndHour    = input.int(11, "Entry End Hour", minval=0, maxval=23, group=grp3)
-entryEndMin     = input.int(30, "Entry End Minute", minval=0, maxval=59, group=grp3)
+entryEndHour    = input.int(14, "Entry End Hour", minval=0, maxval=23, group=grp3)
+entryEndMin     = input.int(0, "Entry End Minute", minval=0, maxval=59, group=grp3)
 exitHour        = input.int(15, "Session Close Exit Hour", minval=0, maxval=23, group=grp3)
 exitMin         = input.int(50, "Session Close Exit Minute", minval=0, maxval=59, group=grp3)
 
