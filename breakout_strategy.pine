@@ -5,9 +5,9 @@
 // Mr. Breakouts Formula Implementation
 //
 // Formula Components:
-//   1. POI (Point of Initiation): Previous session close
+//   1. POI (Point of Initiation): Previous session close or today open
 //   2. Space: POI ± (Daily ATR × FRACT) — volatility-adaptive breakout levels
-//   3. Filters: ADX trend strength + RSI directional bias
+//   3. Filter: ADX trend strength (primary, per the book's main example)
 //   4. Time Parameter: Restrict entries to high-activity windows
 //   5. Exits: USD stop-loss + USD profit-target + end-of-day exit
 //   6. Entry: Stop orders (buy above / sell below breakout levels)
@@ -17,10 +17,10 @@
 //   2. stopLossUSD — USD-based protective stop
 //   3. profitTargetUSD — USD-based profit target
 //   4. adxThreshold — ADX filter threshold
-//   5. rsiPeriod — RSI filter lookback
-//   6. rsiThreshold — RSI directional threshold
+//   5. atrPeriod — ATR lookback period
+//   6. adxPeriod — ADX lookback period
 //
-// Designed for: Micro E-mini futures (MES, MNQ, MYM, M2K)
+// Works on: Any Micro futures (MES, MNQ, MYM, M2K, MGC, MCL, etc.)
 // Timeframe: 1-minute bars
 // =============================================================================
 
@@ -43,26 +43,22 @@ strategy("Mr. Breakouts Formula — Micro Futures 1min",
 // INPUTS — 6 Optimization Parameters (per Mr. Breakouts rule)
 // ─────────────────────────────────────────────────────────────
 string grp1 = "═══ BREAKOUT FORMULA ═══"
-fract           = input.float(1.0, "FRACT (ATR Multiplier)", minval=0.1, step=0.1, group=grp1,
-                   tooltip="Multiplier for Daily ATR to calculate breakout distance (SPACE)")
+fract           = input.float(0.3, "FRACT (ATR Multiplier)", minval=0.05, step=0.05, group=grp1,
+                   tooltip="Multiplier for Daily ATR to calculate breakout distance. Lower = tighter levels, more trades. Try 0.1 - 1.0")
 stopLossUSD     = input.float(50.0, "Stop Loss ($)", minval=5, step=5, group=grp1,
                    tooltip="USD-based protective stop loss per contract")
 profitTargetUSD = input.float(100.0, "Profit Target ($)", minval=5, step=5, group=grp1,
                    tooltip="USD-based profit target per contract")
-adxThreshold    = input.float(40.0, "ADX Threshold", minval=5, step=5, group=grp1,
-                   tooltip="Enter only when Daily ADX < this value (avoid overextended/choppy)")
-rsiPeriod       = input.int(14, "RSI Period", minval=2, maxval=50, group=grp1,
-                   tooltip="Lookback period for Daily RSI directional filter")
-rsiThreshold    = input.float(50.0, "RSI Threshold", minval=20, maxval=80, step=5, group=grp1,
-                   tooltip="Daily RSI: Longs when RSI > threshold, Shorts when RSI < (100-threshold)")
+adxThreshold    = input.float(50.0, "ADX Threshold", minval=10, step=5, group=grp1,
+                   tooltip="Enter only when Daily ADX < this value. Higher = more permissive. Book example used 45.")
+atrPeriod       = input.int(25, "ATR Period (Daily)", minval=1, group=grp1,
+                   tooltip="Daily ATR lookback. Book recommends 5, 25, or 40")
+adxPeriod       = input.int(14, "ADX Period (Daily)", minval=1, group=grp1)
 
 // ─────────────────────────────────────────────────────────────
-// FIXED PARAMETERS (not optimized per the book)
+// FIXED PARAMETERS
 // ─────────────────────────────────────────────────────────────
 string grp2 = "═══ FIXED SETTINGS ═══"
-atrPeriod       = input.int(25, "ATR Period (Daily)", minval=1, group=grp2,
-                   tooltip="Daily ATR period. Book recommends 5, 25, or 40")
-adxPeriod       = input.int(14, "ADX Period (Daily)", minval=1, group=grp2)
 poiType         = input.string("Previous Close", "Point of Initiation",
                    options=["Previous Close", "Today Open", "Max(Open, PrevClose)", "Min(Open, PrevClose)"],
                    group=grp2)
@@ -80,14 +76,14 @@ exitHour        = input.int(15, "Session Close Exit Hour", minval=0, maxval=23, 
 exitMin         = input.int(50, "Session Close Exit Minute", minval=0, maxval=59, group=grp3)
 
 // ─────────────────────────────────────────────────────────────
-// DIRECTION FILTER
+// DIRECTION
 // ─────────────────────────────────────────────────────────────
 string grp4 = "═══ DIRECTION ═══"
 tradeLongs      = input.bool(true, "Trade Long", group=grp4)
 tradeShorts     = input.bool(true, "Trade Short", group=grp4)
 
 // ─────────────────────────────────────────────────────────────
-// VISUAL SETTINGS
+// VISUALS
 // ─────────────────────────────────────────────────────────────
 string grp5 = "═══ VISUALS ═══"
 showBreakoutLevels = input.bool(true, "Show Breakout Levels", group=grp5)
@@ -97,10 +93,10 @@ showPOI            = input.bool(false, "Show POI Line", group=grp5)
 // CALCULATIONS
 // =============================================================================
 
+// ── Detect new trading day ──
+newDay = ta.change(time("D")) != 0
+
 // ── DAILY ATR: The "Holy Grail Indicator" (per the book) ──
-// CRITICAL: ATR must be on DAILY timeframe, not 1-min.
-// On 1-min bars, ATR would be tiny (fraction of a point) and useless for
-// calculating meaningful breakout distance from a daily POI.
 dailyATR = request.security(syminfo.tickerid, "D", ta.atr(atrPeriod), lookahead=barmerge.lookahead_on)
 
 // ── Point of Initiation (POI) ──
@@ -125,24 +121,14 @@ breakoutShort = poi - space
 stopLossTicks     = math.round(stopLossUSD / syminfo.pointvalue / syminfo.mintick)
 profitTargetTicks = math.round(profitTargetUSD / syminfo.pointvalue / syminfo.mintick)
 
-// ── FILTER 1: ADX on DAILY — Trend Strength ──
-// Daily ADX avoids the noise of 1-min ADX which flips constantly
-// ta.dmi() returns [diPlus, diMinus, adx] — extract ADX (3rd element)
+// ── FILTER: ADX on DAILY — Trend Strength ──
+// This is the primary filter per the book's main code example:
+//   FILTER = ADX(25) < Filter_Period;
+// ADX < threshold means market is not overextended → room for breakout move.
+// Uses DAILY ADX for stability (1-min ADX is pure noise).
 [dmiPlus, dmiMinus, dmiADX] = ta.dmi(adxPeriod, adxPeriod)
 dailyADX = request.security(syminfo.tickerid, "D", dmiADX, lookahead=barmerge.lookahead_on)
 adxFilter = dailyADX < adxThreshold
-
-// ── FILTER 2: RSI on DAILY — Directional Bias ──
-// Daily RSI provides stable directional bias for the session:
-//   Longs: RSI > threshold (bullish bias)
-//   Shorts: RSI < (100 - threshold) (bearish bias)
-dailyRSI = request.security(syminfo.tickerid, "D", ta.rsi(close, rsiPeriod), lookahead=barmerge.lookahead_on)
-rsiFilterLong  = dailyRSI > rsiThreshold
-rsiFilterShort = dailyRSI < (100 - rsiThreshold)
-
-// ── Combined Filters ──
-filterLong  = adxFilter and rsiFilterLong
-filterShort = adxFilter and rsiFilterShort
 
 // ── Time Filter ──
 currentTime = hour * 100 + minute
@@ -153,26 +139,37 @@ exitTime       = exitHour * 100 + exitMin
 inEntryWindow = useTimeFilter ? (currentTime >= entryStartTime and currentTime <= entryEndTime) : true
 isSessionClose = currentTime >= exitTime
 
+// ── Track if we already traded today (one trade per day max) ──
+var bool tradedToday = false
+if newDay
+    tradedToday := false
+
 // =============================================================================
 // ENTRY CONDITIONS (via Stop Orders)
 // =============================================================================
 
 isFlat = strategy.position_size == 0
+canTrade = isFlat and inEntryWindow and adxFilter and not tradedToday
 
 // ── LONG Entry ──
-// Place a buy stop at breakoutLong level. If price rises and touches it, we enter long.
-// Filters use DAILY indicators so they remain stable throughout the session.
-longCondition = isFlat and inEntryWindow and filterLong and tradeLongs and not na(breakoutLong)
+// Buy stop order at breakoutLong: triggers when price rises to that level.
+// Only valid if breakout level is ABOVE current price (otherwise it's not a breakout).
+longValid = canTrade and tradeLongs and not na(breakoutLong) and breakoutLong > close
 
-if longCondition
+if longValid
     strategy.entry("Long", strategy.long, stop=breakoutLong, comment="BO Long")
 
 // ── SHORT Entry ──
-// Place a sell stop at breakoutShort level. If price drops and touches it, we enter short.
-shortCondition = isFlat and inEntryWindow and filterShort and tradeShorts and not na(breakoutShort)
+// Sell stop order at breakoutShort: triggers when price falls to that level.
+// Only valid if breakout level is BELOW current price.
+shortValid = canTrade and tradeShorts and not na(breakoutShort) and breakoutShort < close
 
-if shortCondition
+if shortValid
     strategy.entry("Short", strategy.short, stop=breakoutShort, comment="BO Short")
+
+// Track when a trade fills
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    tradedToday := true
 
 // Cancel unfilled pending orders outside the entry window
 if not inEntryWindow and isFlat
@@ -205,17 +202,20 @@ if isSessionClose and strategy.position_size != 0
 // PLOTTING
 // =============================================================================
 
-// Breakout levels as step lines
+// Breakout levels
+boLongColor = longValid ? color.new(color.green, 10) : color.new(color.green, 70)
+boShortColor = shortValid ? color.new(color.red, 10) : color.new(color.red, 70)
+
 pLong  = plot(showBreakoutLevels and not na(breakoutLong) ? breakoutLong : na,
-              "Breakout Long", color=color.new(color.green, 30), linewidth=2, style=plot.style_stepline)
+              "Breakout Long", color=boLongColor, linewidth=2, style=plot.style_stepline)
 pShort = plot(showBreakoutLevels and not na(breakoutShort) ? breakoutShort : na,
-              "Breakout Short", color=color.new(color.red, 30), linewidth=2, style=plot.style_stepline)
+              "Breakout Short", color=boShortColor, linewidth=2, style=plot.style_stepline)
 
 // POI reference line
 plot(showPOI and not na(poi) ? poi : na, "POI", color=color.new(color.yellow, 50),
      linewidth=1, style=plot.style_stepline)
 
-// Fill between breakout levels (the breakout zone)
+// Fill between breakout levels
 fill(pLong, pShort, color=color.new(color.gray, 92), title="Breakout Zone")
 
 // Background: entry time window
@@ -224,18 +224,18 @@ bgcolor(useTimeFilter and inEntryWindow ? color.new(color.blue, 95) : na, title=
 // Background: session close zone
 bgcolor(isSessionClose ? color.new(color.red, 95) : na, title="Session Close Zone")
 
-// Entry signal markers on chart
-plotshape(longCondition and close < breakoutLong ? breakoutLong : na,
+// Entry signal markers
+plotshape(longValid ? breakoutLong : na,
           style=shape.triangleup, location=location.absolute,
           color=color.green, size=size.tiny, title="Long Pending")
-plotshape(shortCondition and close > breakoutShort ? breakoutShort : na,
+plotshape(shortValid ? breakoutShort : na,
           style=shape.triangledown, location=location.absolute,
           color=color.red, size=size.tiny, title="Short Pending")
 
 // =============================================================================
 // INFO TABLE
 // =============================================================================
-var table infoTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80),
+var table infoTable = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 80),
                                  border_width=1, border_color=color.gray)
 
 if barstate.islast
@@ -261,37 +261,33 @@ if barstate.islast
     table.cell(infoTable, 1, 5, str.tostring(breakoutShort, "#.##"),
                text_color=color.red, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 6, "Stop Loss", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 6, "$" + str.tostring(stopLossUSD, "#.##"),
+    table.cell(infoTable, 0, 6, "Stop / Target", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, "$" + str.tostring(stopLossUSD) + " / $" + str.tostring(profitTargetUSD),
                text_color=color.orange, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 7, "Profit Target", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 7, "$" + str.tostring(profitTargetUSD, "#.##"),
-               text_color=color.lime, text_size=size.tiny)
-
-    table.cell(infoTable, 0, 8, "Daily ADX", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 8, str.tostring(dailyADX, "#.#") + " / " + str.tostring(adxThreshold),
+    table.cell(infoTable, 0, 7, "Daily ADX", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, str.tostring(dailyADX, "#.#") + " < " + str.tostring(adxThreshold),
                text_color=adxFilter ? color.lime : color.red, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 9, "Daily RSI", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 9, str.tostring(dailyRSI, "#.#"),
-               text_color=color.white, text_size=size.tiny)
-
-    table.cell(infoTable, 0, 10, "Entry Window", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 10, inEntryWindow ? "ACTIVE" : "CLOSED",
+    table.cell(infoTable, 0, 8, "Entry Window", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 8, inEntryWindow ? "ACTIVE" : "CLOSED",
                text_color=inEntryWindow ? color.lime : color.red, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 11, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 0, 9, "Traded Today", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 9, tradedToday ? "YES" : "NO",
+               text_color=tradedToday ? color.orange : color.lime, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 10, "Position", text_color=color.gray, text_size=size.tiny)
     string posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     color posCol = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
-    table.cell(infoTable, 1, 11, posText, text_color=posCol, text_size=size.tiny)
+    table.cell(infoTable, 1, 10, posText, text_color=posCol, text_size=size.tiny)
 
 // =============================================================================
 // ALERTS
 // =============================================================================
-alertcondition(longCondition, title="Long Breakout Signal",
+alertcondition(longValid, title="Long Breakout Signal",
                message="LONG Breakout: {{ticker}} at {{close}}")
-alertcondition(shortCondition, title="Short Breakout Signal",
+alertcondition(shortValid, title="Short Breakout Signal",
                message="SHORT Breakout: {{ticker}} at {{close}}")
 alertcondition(isSessionClose and strategy.position_size != 0, title="EOD Exit",
                message="End of Day Exit: {{ticker}} closing all positions")
