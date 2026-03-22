@@ -2,17 +2,17 @@
 // Breakout Trading Strategy for Micro Futures — 1 Minute Timeframe
 // =============================================================================
 // Based on "The BreakOut Trading Revolution" by Tomas Nesnidal
-// Mr. Breakouts Formula Implementation
+// Mr. Breakouts Formula — Adapted for Intraday Scalping (10-30 trades/day)
 //
-// Formula Components:
-//   1. POI (Point of Initiation): Today's session open
-//   2. Space: POI ± (Daily ATR × FRACT) — volatility-adaptive breakout levels
-//   3. Filter: ADX trend strength (per the book's primary example)
-//   4. Time Parameter: Configurable entry window
+// Formula Components (per the book):
+//   1. POI: Rolling N-bar High/Low channel (intraday adaptation)
+//   2. Space: POI ± (ATR × FRACT) — volatility-adaptive breakout distance
+//   3. Filter: ADX trend strength
+//   4. Time Parameter: Configurable session window
 //   5. Exits: USD stop-loss + USD profit-target + end-of-day exit
-//   6. Entry: Market order on breakout level cross (simulates stop order)
+//   6. Entry: Market order when price breaks through the level
 //
-// Designed for: Any Micro futures (MES, MNQ, MYM, M2K, MGC, MCL, etc.)
+// Works on: Any Micro futures (MES, MNQ, MYM, M2K, MGC, MCL, etc.)
 // Timeframe: 1-minute bars
 // =============================================================================
 
@@ -32,40 +32,41 @@ strategy("Mr. Breakouts Formula — Micro Futures 1min",
      margin_short=2)
 
 // ─────────────────────────────────────────────────────────────
-// INPUTS — Optimization Parameters (max 6 per Mr. Breakouts rule)
+// INPUTS — Optimization Parameters (max 6 per book's rule)
 // ─────────────────────────────────────────────────────────────
 string grp1 = "═══ BREAKOUT FORMULA ═══"
-fract           = input.float(0.3, "FRACT (ATR Multiplier)", minval=0.05, step=0.05, group=grp1,
-                   tooltip="Multiplier for Daily ATR to set breakout distance. Try 0.1–1.0")
-stopLossUSD     = input.float(50.0, "Stop Loss ($)", minval=5, step=5, group=grp1,
-                   tooltip="USD-based protective stop loss per contract")
-profitTargetUSD = input.float(100.0, "Profit Target ($)", minval=5, step=5, group=grp1,
+poiLength       = input.int(20, "POI Lookback (bars)", minval=5, maxval=100, step=5, group=grp1,
+                   tooltip="Number of bars for the rolling high/low channel. Lower = more signals. Try 10-30.")
+fract           = input.float(0.2, "FRACT (ATR Multiplier)", minval=0.0, step=0.05, group=grp1,
+                   tooltip="Extra space beyond the channel via ATR. 0 = pure channel breakout. Try 0.0-0.5")
+stopLossUSD     = input.float(30.0, "Stop Loss ($)", minval=5, step=5, group=grp1,
+                   tooltip="USD-based stop loss per contract")
+profitTargetUSD = input.float(60.0, "Profit Target ($)", minval=5, step=5, group=grp1,
                    tooltip="USD-based profit target per contract")
 adxThreshold    = input.float(50.0, "ADX Threshold", minval=10, step=5, group=grp1,
-                   tooltip="Enter when Daily ADX < this. Higher = more permissive. Book used 45.")
-atrPeriod       = input.int(25, "ATR Period (Daily)", minval=1, group=grp1,
-                   tooltip="Daily ATR lookback. Book recommends 5, 25, or 40")
-adxPeriod       = input.int(14, "ADX Period (Daily)", minval=1, group=grp1)
+                   tooltip="Enter when ADX < this. Higher = more permissive. 50+ = nearly always on.")
+atrLength       = input.int(14, "ATR Period (1-min)", minval=1, group=grp1,
+                   tooltip="ATR lookback on 1-min bars for SPACE calculation")
 
 // ─────────────────────────────────────────────────────────────
-// FIXED PARAMETERS
+// SETTINGS
 // ─────────────────────────────────────────────────────────────
 string grp2 = "═══ SETTINGS ═══"
-poiType         = input.string("Today Open", "Point of Initiation",
-                   options=["Today Open", "Previous Close", "Max(Open, PrevClose)", "Min(Open, PrevClose)"],
-                   group=grp2)
+adxLength       = input.int(14, "ADX Period", minval=1, group=grp2)
+cooldownBars    = input.int(5, "Cooldown After Trade (bars)", minval=0, maxval=50, group=grp2,
+                   tooltip="Wait N bars after exit before next entry. Prevents overtrading.")
 
 // ─────────────────────────────────────────────────────────────
 // TIME FILTER
 // ─────────────────────────────────────────────────────────────
 string grp3 = "═══ TIME FILTER ═══"
 useTimeFilter   = input.bool(false, "Enable Time Filter", group=grp3,
-                   tooltip="OFF = trade any time. Turn ON for equity indices and set session hours.")
+                   tooltip="OFF = trade any time. Turn ON and set hours for specific sessions.")
 entryStartHour  = input.int(9, "Entry Start Hour", minval=0, maxval=23, group=grp3)
 entryStartMin   = input.int(30, "Entry Start Minute", minval=0, maxval=59, group=grp3)
-entryEndHour    = input.int(14, "Entry End Hour", minval=0, maxval=23, group=grp3)
+entryEndHour    = input.int(15, "Entry End Hour", minval=0, maxval=23, group=grp3)
 entryEndMin     = input.int(0, "Entry End Minute", minval=0, maxval=59, group=grp3)
-useEODExit      = input.bool(true, "Enable End-of-Day Exit", group=grp3)
+useEODExit      = input.bool(false, "Enable End-of-Day Exit", group=grp3)
 exitHour        = input.int(15, "EOD Exit Hour", minval=0, maxval=23, group=grp3)
 exitMin         = input.int(50, "EOD Exit Minute", minval=0, maxval=59, group=grp3)
 
@@ -75,55 +76,42 @@ exitMin         = input.int(50, "EOD Exit Minute", minval=0, maxval=59, group=gr
 string grp4 = "═══ DIRECTION ═══"
 tradeLongs      = input.bool(true, "Trade Long", group=grp4)
 tradeShorts     = input.bool(true, "Trade Short", group=grp4)
-oncePerDay      = input.bool(true, "Max One Trade Per Day", group=grp4)
 
 // ─────────────────────────────────────────────────────────────
 // VISUALS
 // ─────────────────────────────────────────────────────────────
 string grp5 = "═══ VISUALS ═══"
 showBreakoutLevels = input.bool(true, "Show Breakout Levels", group=grp5)
-showPOI            = input.bool(true, "Show POI Line", group=grp5)
-
-// =============================================================================
-// DAILY DATA via request.security
-// =============================================================================
-
-// ── Previous day's confirmed ATR (use [1] to avoid lookahead bias) ──
-dailyATR = request.security(syminfo.tickerid, "D", ta.atr(atrPeriod)[1], lookahead=barmerge.lookahead_on)
-
-// ── POI prices ──
-prevDayClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
-todayOpen    = request.security(syminfo.tickerid, "D", open, lookahead=barmerge.lookahead_on)
-
-// ── ADX filter from daily (use [1] for confirmed value) ──
-[dmiPlus, dmiMinus, dmiADX] = ta.dmi(adxPeriod, adxPeriod)
-dailyADX = request.security(syminfo.tickerid, "D", dmiADX[1], lookahead=barmerge.lookahead_on)
+showChannel        = input.bool(true, "Show POI Channel", group=grp5)
 
 // =============================================================================
 // CORE CALCULATIONS
 // =============================================================================
 
-// ── Point of Initiation ──
-float poi = switch poiType
-    "Today Open"              => todayOpen
-    "Previous Close"          => prevDayClose
-    "Max(Open, PrevClose)"    => math.max(todayOpen, prevDayClose)
-    "Min(Open, PrevClose)"    => math.min(todayOpen, prevDayClose)
-    => todayOpen
+// ── POI: Rolling N-bar High/Low Channel ──
+// This is the intraday adaptation of the book's POI concept.
+// Instead of a single daily reference price, we use a rolling
+// channel of the highest high and lowest low over N bars.
+poiHigh = ta.highest(high, poiLength)
+poiLow  = ta.lowest(low, poiLength)
 
-// ── SPACE = ATR × FRACT ──
-space = fract * dailyATR
+// ── ATR on 1-min bars for SPACE calculation ──
+atrValue = ta.atr(atrLength)
 
-// ── Breakout Levels ──
-breakoutLong  = poi + space
-breakoutShort = poi - space
+// ── SPACE = ATR × FRACT (additional distance beyond channel) ──
+space = fract * atrValue
 
-// ── USD to ticks conversion for exits ──
+// ── Breakout Levels = Channel ± Space ──
+breakoutLong  = poiHigh + space
+breakoutShort = poiLow - space
+
+// ── USD to ticks for exits ──
 stopLossTicks     = math.round(stopLossUSD / syminfo.pointvalue / syminfo.mintick)
 profitTargetTicks = math.round(profitTargetUSD / syminfo.pointvalue / syminfo.mintick)
 
-// ── ADX Filter: market not overextended ──
-adxFilter = na(dailyADX) ? true : dailyADX < adxThreshold
+// ── ADX Filter on 1-min (trend strength) ──
+[dmiPlus, dmiMinus, adxVal] = ta.dmi(adxLength, adxLength)
+adxFilter = adxVal < adxThreshold
 
 // ── Time Filter ──
 currentTime = hour * 100 + minute
@@ -134,41 +122,41 @@ exitTime       = exitHour * 100 + exitMin
 inEntryWindow = useTimeFilter ? (currentTime >= entryStartTime and currentTime <= entryEndTime) : true
 isSessionClose = useEODExit ? (currentTime >= exitTime) : false
 
-// ── One trade per day tracker ──
-newDay = ta.change(time("D")) != 0
-var bool tradedToday = false
-if newDay
-    tradedToday := false
+// ── Cooldown tracker ──
+var int barsSinceExit = 999
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit := barsSinceExit + 1
+
+pastCooldown = barsSinceExit >= cooldownBars
 
 // =============================================================================
-// ENTRY CONDITIONS — Price crossing breakout level (= stop order simulation)
+// ENTRY CONDITIONS
 // =============================================================================
 
 isFlat = strategy.position_size == 0
-canTrade = isFlat and inEntryWindow and adxFilter and (oncePerDay ? not tradedToday : true)
+canTrade = isFlat and inEntryWindow and adxFilter and pastCooldown
 
-// ── LONG: price crosses above the upper breakout level ──
-longCross = ta.crossover(close, breakoutLong)
-longEntry = canTrade and tradeLongs and longCross and not na(breakoutLong)
+// ── LONG: price breaks above the upper breakout level ──
+longBreak = ta.crossover(close, breakoutLong)
+longEntry = canTrade and tradeLongs and longBreak
 
-// ── SHORT: price crosses below the lower breakout level ──
-shortCross = ta.crossunder(close, breakoutShort)
-shortEntry = canTrade and tradeShorts and shortCross and not na(breakoutShort)
+// ── SHORT: price breaks below the lower breakout level ──
+shortBreak = ta.crossunder(close, breakoutShort)
+shortEntry = canTrade and tradeShorts and shortBreak
 
 // ── Execute entries ──
 if longEntry
     strategy.entry("Long", strategy.long, comment="BO Long")
-    tradedToday := true
 
 if shortEntry
     strategy.entry("Short", strategy.short, comment="BO Short")
-    tradedToday := true
 
 // =============================================================================
 // EXIT CONDITIONS
 // =============================================================================
 
-// ── USD-based Stop Loss & Profit Target ──
 if strategy.position_size > 0
     strategy.exit("Long Exit", "Long",
                   loss=stopLossTicks,
@@ -181,7 +169,6 @@ if strategy.position_size < 0
                   profit=profitTargetTicks,
                   comment_loss="SL", comment_profit="PT")
 
-// ── End of Day Exit ──
 if isSessionClose and strategy.position_size != 0
     strategy.close_all(comment="EOD Exit")
 
@@ -189,28 +176,28 @@ if isSessionClose and strategy.position_size != 0
 // PLOTTING
 // =============================================================================
 
-// Breakout levels
-pLong  = plot(showBreakoutLevels and not na(breakoutLong) ? breakoutLong : na,
+// POI Channel (the N-bar high/low)
+pChanHigh = plot(showChannel ? poiHigh : na, "Channel High",
+                 color=color.new(color.yellow, 60), linewidth=1, style=plot.style_stepline)
+pChanLow  = plot(showChannel ? poiLow : na, "Channel Low",
+                 color=color.new(color.yellow, 60), linewidth=1, style=plot.style_stepline)
+fill(pChanHigh, pChanLow, color=color.new(color.yellow, 93), title="POI Channel")
+
+// Breakout levels (channel + space)
+pLong  = plot(showBreakoutLevels ? breakoutLong : na,
               "BO Long", color=color.new(color.lime, 20), linewidth=2, style=plot.style_stepline)
-pShort = plot(showBreakoutLevels and not na(breakoutShort) ? breakoutShort : na,
+pShort = plot(showBreakoutLevels ? breakoutShort : na,
               "BO Short", color=color.new(color.red, 20), linewidth=2, style=plot.style_stepline)
 
-// POI line
-plot(showPOI and not na(poi) ? poi : na, "POI", color=color.new(color.yellow, 40),
-     linewidth=1, style=plot.style_stepline)
-
-// Fill between levels
-fill(pLong, pShort, color=color.new(color.gray, 90), title="Breakout Zone")
-
-// Background for time window
-bgcolor(useTimeFilter and inEntryWindow ? color.new(color.blue, 95) : na, title="Entry Window")
-bgcolor(isSessionClose ? color.new(color.red, 95) : na, title="EOD Zone")
-
-// Entry signals on chart
+// Entry signals
 plotshape(longEntry, style=shape.labelup, location=location.belowbar,
           color=color.green, text="BUY", textcolor=color.white, size=size.small, title="Long Signal")
 plotshape(shortEntry, style=shape.labeldown, location=location.abovebar,
           color=color.red, text="SELL", textcolor=color.white, size=size.small, title="Short Signal")
+
+// Background
+bgcolor(useTimeFilter and inEntryWindow ? color.new(color.blue, 95) : na, title="Entry Window")
+bgcolor(isSessionClose ? color.new(color.red, 95) : na, title="EOD Zone")
 
 // =============================================================================
 // INFO TABLE
@@ -223,29 +210,30 @@ if barstate.islast
                text_size=size.small, bgcolor=color.new(color.blue, 60))
     table.merge_cells(infoTable, 0, 0, 1, 0)
 
-    table.cell(infoTable, 0, 1, "POI Type", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 1, poiType, text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 1, "Channel", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, str.tostring(poiLength) + " bars", text_color=color.yellow, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 2, "POI Value", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 2, str.tostring(poi, "#.##"), text_color=color.yellow, text_size=size.tiny)
-
-    table.cell(infoTable, 0, 3, "FRACT / ATR", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, str.tostring(fract, "#.##") + " x " + str.tostring(dailyATR, "#.##"),
+    table.cell(infoTable, 0, 2, "FRACT / ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, str.tostring(fract, "#.##") + " x " + str.tostring(atrValue, "#.##"),
                text_color=color.white, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 4, "BO Long", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, str.tostring(breakoutLong, "#.##"), text_color=color.lime, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "BO Long", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(breakoutLong, "#.##"), text_color=color.lime, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 5, "BO Short", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 5, str.tostring(breakoutShort, "#.##"), text_color=color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "BO Short", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, str.tostring(breakoutShort, "#.##"), text_color=color.red, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 6, "SL / PT", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 6, "$" + str.tostring(stopLossUSD) + " / $" + str.tostring(profitTargetUSD),
+    table.cell(infoTable, 0, 5, "SL / PT", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, "$" + str.tostring(stopLossUSD) + " / $" + str.tostring(profitTargetUSD),
                text_color=color.orange, text_size=size.tiny)
 
-    table.cell(infoTable, 0, 7, "ADX Filter", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 7, (na(dailyADX) ? "N/A" : str.tostring(dailyADX, "#.#")) + " < " + str.tostring(adxThreshold),
+    table.cell(infoTable, 0, 6, "ADX", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, str.tostring(adxVal, "#.#") + " < " + str.tostring(adxThreshold),
                text_color=adxFilter ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(infoTable, 0, 7, "Cooldown", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, pastCooldown ? "READY" : str.tostring(cooldownBars - barsSinceExit) + " bars",
+               text_color=pastCooldown ? color.lime : color.orange, text_size=size.tiny)
 
     table.cell(infoTable, 0, 8, "Can Trade", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 8, canTrade ? "YES" : "NO",
