@@ -19,7 +19,7 @@
 //@version=6
 strategy("Mr. Breakouts Formula — Micro Futures 1min",
      overlay=true,
-     initial_capital=5000,
+     initial_capital=10000,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
      commission_type=strategy.commission.cash_per_order,
@@ -28,8 +28,8 @@ strategy("Mr. Breakouts Formula — Micro Futures 1min",
      calc_on_every_tick=false,
      process_orders_on_close=false,
      close_entries_rule="ANY",
-     margin_long=50,
-     margin_short=50)
+     margin_long=2,
+     margin_short=2)
 
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Optimization Parameters (max 6 per Mr. Breakouts rule)
