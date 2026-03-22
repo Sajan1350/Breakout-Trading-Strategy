@@ -90,10 +90,10 @@ showChannel        = input.bool(true, "Show POI Channel", group=grp5)
 
 // ── POI: Rolling N-bar High/Low Channel ──
 // This is the intraday adaptation of the book's POI concept.
-// Instead of a single daily reference price, we use a rolling
-// channel of the highest high and lowest low over N bars.
-poiHigh = ta.highest(high, poiLength)
-poiLow  = ta.lowest(low, poiLength)
+// Uses PREVIOUS bars only (offset by 1) so the current bar
+// can actually break through the level.
+poiHigh = ta.highest(high[1], poiLength)
+poiLow  = ta.lowest(low[1], poiLength)
 
 // ── ATR on 1-min bars for SPACE calculation ──
 atrValue = ta.atr(atrLength)
