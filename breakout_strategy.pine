@@ -6,25 +6,25 @@
 //
 // R1 IMPROVEMENTS (Institutional-Grade Refinements):
 //   1. ATR-Scaled Exits: SL & PT now scale with volatility (no more fixed USD)
-//   2. ADX Filter Calibrated: Threshold lowered to 25 (meaningful filter)
+//   2. ADX Filter Calibrated: Threshold lowered to 15 (meaningful filter)
 //   3. POI Lookback Increased: Default 30 bars (structural levels, not noise)
 //   4. Time Filter ON by Default: US session 08:30-13:00 ET for Gold
 //   5. Volume Confirmation: Breakout bar must have above-average volume
-//   6. Volatility Regime Filter: ATR must be above minimum threshold
+//   6. ATR Expansion Filter: ATR(5) > ATR(20) = market waking up
 //   7. Cooldown Increased: 10 bars to prevent whipsaw re-entries
-//   8. Partial Profit Taking: 50% off at 1x risk, trail remainder
-//   9. EOD Exit Enabled: Close all positions before session ends
+//   8. Simple SL/PT exits (1 contract)
 //
 // Formula: Breakout = POI +/- (ATR x FRACT)
 // Works on: Any Micro futures (MES, MNQ, MYM, M2K, MGC, MCL, etc.)
 // Timeframe: 1-minute bars
 // =============================================================================
+
 //@version=6
 strategy("Mr. Breakouts Formula R1 — Micro Futures 1min",
      overlay=true,
      initial_capital=10000,
      default_qty_type=strategy.fixed,
-     default_qty_value=2,
+     default_qty_value=1,
      commission_type=strategy.commission.cash_per_order,
      commission_value=0.62,
      slippage=1,
@@ -33,6 +33,7 @@ strategy("Mr. Breakouts Formula R1 — Micro Futures 1min",
      close_entries_rule="ANY",
      margin_long=2,
      margin_short=2)
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Breakout Formula
 // ─────────────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ fract           = input.float(0.3, "FRACT (ATR Multiplier)", minval=0.0, step=0.
                    tooltip="Extra space beyond the channel via ATR. 0 = pure channel breakout. Try 0.1-0.5")
 atrLength       = input.int(14, "ATR Period (1-min)", minval=1, group=grp1,
                    tooltip="ATR lookback on 1-min bars for SPACE calculation and dynamic exits")
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — ATR-Scaled Exits (R1: Replaces Fixed USD Stops)
 // ─────────────────────────────────────────────────────────────
@@ -57,16 +59,7 @@ stopLossUSD     = input.float(30.0, "Fixed Stop Loss $ (if ATR exits OFF)", minv
                    tooltip="Fallback fixed USD stop loss (only used if ATR exits disabled)")
 profitTargetUSD = input.float(60.0, "Fixed Profit Target $ (if ATR exits OFF)", minval=5, step=5, group=grp1b,
                    tooltip="Fallback fixed USD profit target (only used if ATR exits disabled)")
-// ─────────────────────────────────────────────────────────────
-// INPUTS — Partial Profit Taking (R1)
-// ─────────────────────────────────────────────────────────────
-string grp1c = "═══ PARTIAL PROFITS (R1) ═══"
-usePartialTP    = input.bool(true, "Enable Partial Profit Taking", group=grp1c,
-                   tooltip="R1: Take 50% off at first target, trail the rest.")
-partialATRMult  = input.float(1.5, "Partial TP (ATR Multiplier)", minval=0.5, maxval=5.0, step=0.25, group=grp1c,
-                   tooltip="First partial exit at ATR x this value. Should be < full PT multiplier.")
-trailATRMult    = input.float(1.5, "Trailing Stop (ATR Multiplier)", minval=0.5, maxval=5.0, step=0.25, group=grp1c,
-                   tooltip="After partial TP, trail remaining position by ATR x this value.")
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Filters
 // ─────────────────────────────────────────────────────────────
@@ -92,6 +85,7 @@ atrFastLength   = input.int(5, "ATR Fast Period", minval=2, maxval=20, group=grp
                    tooltip="Short-term ATR. When this > ATR slow, volatility is expanding.")
 atrSlowLength   = input.int(20, "ATR Slow Period", minval=10, maxval=100, group=grp2,
                    tooltip="Long-term ATR baseline. Fast ATR must exceed this for entry.")
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Time Filter (R1: Enabled by Default)
 // ─────────────────────────────────────────────────────────────
@@ -102,16 +96,14 @@ entryStartHour  = input.int(8, "Entry Start Hour", minval=0, maxval=23, group=gr
 entryStartMin   = input.int(30, "Entry Start Minute", minval=0, maxval=59, group=grp3)
 entryEndHour    = input.int(13, "Entry End Hour", minval=0, maxval=23, group=grp3)
 entryEndMin     = input.int(0, "Entry End Minute", minval=0, maxval=59, group=grp3)
-useEODExit      = input.bool(true, "Enable End-of-Day Exit", group=grp3,
-                   tooltip="R1: ON by default. Close all positions at session end.")
-exitHour        = input.int(15, "EOD Exit Hour", minval=0, maxval=23, group=grp3)
-exitMin         = input.int(50, "EOD Exit Minute", minval=0, maxval=59, group=grp3)
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Direction
 // ─────────────────────────────────────────────────────────────
 string grp4 = "═══ DIRECTION ═══"
 tradeLongs      = input.bool(true, "Trade Long", group=grp4)
 tradeShorts     = input.bool(true, "Trade Short", group=grp4)
+
 // ─────────────────────────────────────────────────────────────
 // INPUTS — Visuals
 // ─────────────────────────────────────────────────────────────
@@ -119,210 +111,215 @@ string grp5 = "═══ VISUALS ═══"
 showBreakoutLevels = input.bool(true, "Show Breakout Levels", group=grp5)
 showChannel        = input.bool(true, "Show POI Channel", group=grp5)
 showVolBars        = input.bool(true, "Highlight High-Volume Bars (R1)", group=grp5)
+
 // =============================================================================
 // CORE CALCULATIONS
 // =============================================================================
+
 // ── POI: Rolling N-bar High/Low Channel ──
 // Uses PREVIOUS bars only (offset by 1) so the current bar
 // can actually break through the level.
 poiHigh = ta.highest(high[1], poiLength)
 poiLow  = ta.lowest(low[1], poiLength)
+
 // ── ATR on 1-min bars ──
 atrValue = ta.atr(atrLength)
+
 // ── SPACE = ATR x FRACT ──
 space = fract * atrValue
+
 // ── Breakout Levels = Channel +/- Space ──
 breakoutLong  = poiHigh + space
 breakoutShort = poiLow - space
+
 // ── ATR-Scaled Exit Calculations (R1) ──
 // Convert ATR-based distances to ticks for strategy.exit()
 atrSLDistance = atrValue * slATRMult
 atrPTDistance = atrValue * ptATRMult
-atrPartialDistance = atrValue * partialATRMult
-atrTrailDistance   = atrValue * trailATRMult
+
 // Choose exit mode: ATR-scaled or fixed USD
 effectiveSLTicks = useATRExits ?
      math.round(atrSLDistance / syminfo.mintick) :
      math.round(stopLossUSD / syminfo.pointvalue / syminfo.mintick)
+
 effectivePTTicks = useATRExits ?
      math.round(atrPTDistance / syminfo.mintick) :
      math.round(profitTargetUSD / syminfo.pointvalue / syminfo.mintick)
-partialPTTicks = math.round(atrPartialDistance / syminfo.mintick)
-trailTicks     = math.round(atrTrailDistance / syminfo.mintick)
+
 // Display values in USD for the info table
 effectiveSLUSD = useATRExits ? atrSLDistance * syminfo.pointvalue : stopLossUSD
 effectivePTUSD = useATRExits ? atrPTDistance * syminfo.pointvalue : profitTargetUSD
+
 // ── ADX Filter (R1: Now ADX > threshold = trend confirmed) ──
 [dmiPlus, dmiMinus, adxVal] = ta.dmi(adxLength, adxLength)
 adxFilter = adxVal > adxThreshold
+
 // ── Volume Filter (R1) ──
 avgVolume = ta.sma(volume, volLookback)
 volumeFilter = useVolFilter ? (volume > avgVolume * volMultiplier) : true
+
 // ── Volatility Regime Filter (R1 — disabled by default) ──
 atrMA = ta.sma(atrValue, atrSMALength)
 volatilityFilter = useVolatilityRegime ? (atrValue > atrMA * volRegimePct) : true
+
 // ── ATR Expansion Filter (R1) ──
 // When ATR(fast) > ATR(slow), volatility is EXPANDING = market waking up.
 // When ATR(fast) < ATR(slow), volatility is CONTRACTING = chop/dead = sit out.
 atrFast = ta.atr(atrFastLength)
 atrSlow = ta.atr(atrSlowLength)
 atrExpanding = useATRExpansion ? (atrFast > atrSlow) : true
+
 // ── Time Filter ──
 currentTime = hour * 100 + minute
 entryStartTime = entryStartHour * 100 + entryStartMin
 entryEndTime   = entryEndHour * 100 + entryEndMin
-exitTime       = exitHour * 100 + exitMin
 inEntryWindow = useTimeFilter ? (currentTime >= entryStartTime and currentTime <= entryEndTime) : true
-isSessionClose = useEODExit ? (currentTime >= exitTime) : false
+
 // ── Cooldown tracker ──
 var int barsSinceExit = 999
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     barsSinceExit := 0
 else if strategy.position_size == 0
     barsSinceExit := barsSinceExit + 1
+
 pastCooldown = barsSinceExit >= cooldownBars
+
 // =============================================================================
 // ENTRY CONDITIONS
 // =============================================================================
+
 isFlat = strategy.position_size == 0
 canTrade = isFlat and inEntryWindow and adxFilter and pastCooldown and volatilityFilter and atrExpanding
+
 // ── LONG: price breaks above the upper breakout level + volume confirmation ──
 longBreak = ta.crossover(close, breakoutLong)
 longEntry = canTrade and tradeLongs and longBreak and volumeFilter
+
 // ── SHORT: price breaks below the lower breakout level + volume confirmation ──
 shortBreak = ta.crossunder(close, breakoutShort)
 shortEntry = canTrade and tradeShorts and shortBreak and volumeFilter
+
 // ── Execute entries ──
 if longEntry
     strategy.entry("Long", strategy.long, comment="BO Long")
+
 if shortEntry
     strategy.entry("Short", strategy.short, comment="BO Short")
+
 // =============================================================================
-// EXIT CONDITIONS (R1: ATR-Scaled + Partial Profit Taking)
+// EXIT CONDITIONS (R1: Simple SL/PT)
 // =============================================================================
+
 if strategy.position_size > 0
-    if usePartialTP
-        // Partial exit: 50% at first ATR target
-        strategy.exit("Long Partial", "Long",
-                      qty_percent=50,
-                      loss=effectiveSLTicks,
-                      profit=partialPTTicks,
-                      comment_loss="SL", comment_profit="PT1")
-        // Remainder: trail with ATR-based trailing stop, full PT target
-        strategy.exit("Long Trail", "Long",
-                      loss=effectiveSLTicks,
-                      profit=effectivePTTicks,
-                      trail_points=partialPTTicks,
-                      trail_offset=trailTicks,
-                      comment_loss="SL", comment_profit="PT2", comment_trailing="Trail")
-    else
-        strategy.exit("Long Exit", "Long",
-                      loss=effectiveSLTicks,
-                      profit=effectivePTTicks,
-                      comment_loss="SL", comment_profit="PT")
+    strategy.exit("Long Exit", "Long",
+                  loss=effectiveSLTicks,
+                  profit=effectivePTTicks,
+                  comment_loss="SL", comment_profit="PT")
+
 if strategy.position_size < 0
-    if usePartialTP
-        strategy.exit("Short Partial", "Short",
-                      qty_percent=50,
-                      loss=effectiveSLTicks,
-                      profit=partialPTTicks,
-                      comment_loss="SL", comment_profit="PT1")
-        strategy.exit("Short Trail", "Short",
-                      loss=effectiveSLTicks,
-                      profit=effectivePTTicks,
-                      trail_points=partialPTTicks,
-                      trail_offset=trailTicks,
-                      comment_loss="SL", comment_profit="PT2", comment_trailing="Trail")
-    else
-        strategy.exit("Short Exit", "Short",
-                      loss=effectiveSLTicks,
-                      profit=effectivePTTicks,
-                      comment_loss="SL", comment_profit="PT")
-if isSessionClose and strategy.position_size != 0
-    strategy.close_all(comment="EOD Exit")
+    strategy.exit("Short Exit", "Short",
+                  loss=effectiveSLTicks,
+                  profit=effectivePTTicks,
+                  comment_loss="SL", comment_profit="PT")
+
 // =============================================================================
 // PLOTTING
 // =============================================================================
+
 // POI Channel (the N-bar high/low)
 pChanHigh = plot(showChannel ? poiHigh : na, "Channel High",
                  color=color.new(color.yellow, 60), linewidth=1, style=plot.style_stepline)
 pChanLow  = plot(showChannel ? poiLow : na, "Channel Low",
                  color=color.new(color.yellow, 60), linewidth=1, style=plot.style_stepline)
 fill(pChanHigh, pChanLow, color=color.new(color.yellow, 93), title="POI Channel")
+
 // Breakout levels (channel + space)
 pLong  = plot(showBreakoutLevels ? breakoutLong : na,
               "BO Long", color=color.new(color.lime, 20), linewidth=2, style=plot.style_stepline)
 pShort = plot(showBreakoutLevels ? breakoutShort : na,
               "BO Short", color=color.new(color.red, 20), linewidth=2, style=plot.style_stepline)
+
 // Entry signals
 plotshape(longEntry, style=shape.labelup, location=location.belowbar,
           color=color.green, text="BUY", textcolor=color.white, size=size.small, title="Long Signal")
 plotshape(shortEntry, style=shape.labeldown, location=location.abovebar,
           color=color.red, text="SELL", textcolor=color.white, size=size.small, title="Short Signal")
+
 // R1: High-volume bar highlighting
 barcolor(showVolBars and volume > avgVolume * volMultiplier ? color.new(color.aqua, 40) : na, title="High Vol Bars")
+
 // Background
 bgcolor(useTimeFilter and inEntryWindow ? color.new(color.blue, 95) : na, title="Entry Window")
-bgcolor(isSessionClose ? color.new(color.red, 95) : na, title="EOD Zone")
+
 // =============================================================================
 // INFO TABLE (R1: Expanded with new filter status)
 // =============================================================================
-var table infoTable = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80),
+var table infoTable = table.new(position.top_right, 2, 13, bgcolor=color.new(color.black, 80),
                                  border_width=1, border_color=color.gray)
+
 if barstate.islast
     table.cell(infoTable, 0, 0, "Mr. Breakouts R1", text_color=color.white,
                text_size=size.small, bgcolor=color.new(color.teal, 40))
     table.merge_cells(infoTable, 0, 0, 1, 0)
+
     table.cell(infoTable, 0, 1, "Channel", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 1, str.tostring(poiLength) + " bars", text_color=color.yellow, text_size=size.tiny)
+
     table.cell(infoTable, 0, 2, "FRACT / ATR", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 2, str.tostring(fract, "#.##") + " x " + str.tostring(atrValue, "#.##"),
                text_color=color.white, text_size=size.tiny)
+
     table.cell(infoTable, 0, 3, "BO Long", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 3, str.tostring(breakoutLong, "#.##"), text_color=color.lime, text_size=size.tiny)
+
     table.cell(infoTable, 0, 4, "BO Short", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 4, str.tostring(breakoutShort, "#.##"), text_color=color.red, text_size=size.tiny)
+
     // R1: Show ATR-scaled exits
     table.cell(infoTable, 0, 5, "SL / PT", text_color=color.gray, text_size=size.tiny)
     string exitInfo = useATRExits ?
          "$" + str.tostring(effectiveSLUSD, "#.#") + " / $" + str.tostring(effectivePTUSD, "#.#") + " (ATR)" :
          "$" + str.tostring(stopLossUSD) + " / $" + str.tostring(profitTargetUSD) + " (Fixed)"
     table.cell(infoTable, 1, 5, exitInfo, text_color=color.orange, text_size=size.tiny)
+
     table.cell(infoTable, 0, 6, "ADX", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 6, str.tostring(adxVal, "#.#") + " > " + str.tostring(adxThreshold),
                text_color=adxFilter ? color.lime : color.red, text_size=size.tiny)
+
     // R1: Volume filter status
     table.cell(infoTable, 0, 7, "Volume", text_color=color.gray, text_size=size.tiny)
     string volStatus = useVolFilter ?
          (volumeFilter ? "ABOVE AVG" : "BELOW AVG") : "OFF"
     table.cell(infoTable, 1, 7, volStatus,
                text_color=(not useVolFilter) ? color.gray : volumeFilter ? color.lime : color.red, text_size=size.tiny)
+
     // R1: ATR Expansion status
     table.cell(infoTable, 0, 8, "ATR Exp", text_color=color.gray, text_size=size.tiny)
     string atrExpStatus = useATRExpansion ?
          (atrExpanding ? "EXPANDING" : "CONTRACTING") : "OFF"
     table.cell(infoTable, 1, 8, atrExpStatus,
                text_color=(not useATRExpansion) ? color.gray : atrExpanding ? color.lime : color.red, text_size=size.tiny)
+
     table.cell(infoTable, 0, 9, "Cooldown", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 9, pastCooldown ? "READY" : str.tostring(cooldownBars - barsSinceExit) + " bars",
                text_color=pastCooldown ? color.lime : color.orange, text_size=size.tiny)
+
     // R1: Time window status
     table.cell(infoTable, 0, 10, "Time", text_color=color.gray, text_size=size.tiny)
     string timeStatus = useTimeFilter ?
          (inEntryWindow ? "IN WINDOW" : "OUTSIDE") : "24H"
     table.cell(infoTable, 1, 10, timeStatus,
                text_color=(not useTimeFilter) ? color.gray : inEntryWindow ? color.lime : color.red, text_size=size.tiny)
+
     table.cell(infoTable, 0, 11, "Can Trade", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 11, canTrade ? "YES" : "NO",
                text_color=canTrade ? color.lime : color.red, text_size=size.tiny)
+
     table.cell(infoTable, 0, 12, "Position", text_color=color.gray, text_size=size.tiny)
     string posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     color posCol = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
     table.cell(infoTable, 1, 12, posText, text_color=posCol, text_size=size.tiny)
-    // R1: Partial TP status
-    table.cell(infoTable, 0, 13, "Partial TP", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 13, usePartialTP ? "ON (50%)" : "OFF",
-               text_color=usePartialTP ? color.lime : color.gray, text_size=size.tiny)
+
 // =============================================================================
 // ALERTS
 // =============================================================================
